@@ -1,218 +1,148 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
+import pandas as pd, numpy as np
 import plotly.express as px
 
-st.set_page_config(
-    page_title="대기오염·호흡기질환 상관 분석 대시보드",
-    layout="wide",
-)
-st.title("📊 지역·연도별 대기오염 물질 배출량과 호흡기 질환 진료자수 상관관계 분석")
+st.set_page_config(page_title="대기오염·호흡기질환 다중 상관 분석", layout="wide")
+st.title("📊 연도·지역·오염물질별 대기오염 배출량과 호흡기 질환 진료자수 상관관계")
 
-# -------------------------------------------------------------
-# 1️⃣ 파일 업로드 --------------------------------------------------------
-# -------------------------------------------------------------
-
-st.sidebar.header("CSV 파일 업로드")
-air_file = st.sidebar.file_uploader("전국_대기오염물질_배출량.csv", type=["csv"], key="air")
-resp_file = st.sidebar.file_uploader("지역별_호흡기질환진료인원.csv", type=["csv"], key="resp")
-
+# ──────────────────────── 1. 입력 ────────────────────────
 @st.cache_data(show_spinner=False)
-def load_csv(uploaded_file) -> pd.DataFrame:
-    if uploaded_file is None:
+def load_csv(src):
+    if src is None:
         return pd.DataFrame()
-    return pd.read_csv(uploaded_file, encoding="cp949")
+    return pd.read_csv(src, encoding="cp949")
 
-if not air_file or not resp_file:
-    st.info("좌측 사이드바에서 두 CSV 파일을 모두 업로드해 주세요.")
-    st.stop()
+st.sidebar.header("CSV 입력")
+air_path  = st.sidebar.text_input("전국_대기오염물질_배출량.csv 경로(또는 업로드)")
+resp_path = st.sidebar.text_input("지역별_호흡기질환진료인원.csv 경로(또는 업로드)")
 
-# -------------------------------------------------------------
-# 2️⃣ 데이터 전처리 ------------------------------------------------------
-# -------------------------------------------------------------
+# 로컬 업로드 대체
+if not air_path or not air_path.startswith("http"):
+    air_path  = st.sidebar.file_uploader("전국_대기오염물질_배출량.csv", type="csv", key="air")
+if not resp_path or not resp_path.startswith("http"):
+    resp_path = st.sidebar.file_uploader("지역별_호흡기질환진료인원.csv", type="csv", key="resp")
 
-air_raw = load_csv(air_file)
-resp_raw = load_csv(resp_file)
+air_raw  = load_csv(air_path)
+resp_raw = load_csv(resp_path)
+if air_raw.empty or resp_raw.empty:
+    st.info("좌측 입력을 완료해 주세요."); st.stop()
 
-pollutant_row = air_raw.iloc[0]  # 0번째 행: 오염물질 이름
-air_df = air_raw.drop(0).reset_index(drop=True)
-region_col = air_df.columns[0]   # 보통 "구분(1)" 등 지역명
+# ──────────────────────── 2. 공통 전처리 ────────────────────────
+poll_row   = air_raw.iloc[0]
+air_df     = air_raw.drop(0).reset_index(drop=True)
+region_col = air_df.columns[0]
 
-# ➡️ 연도 추출 (4자리 숫자로 시작하는 컬럼)
-all_years = sorted({c[:4] for c in air_df.columns if c[:4].isdigit()})
+air_years  = sorted({c[:4] for c in air_df.columns if c[:4].isdigit()})
 resp_raw["진료년도"] = resp_raw["진료년도"].str.replace("년", "")
-common_years = sorted(set(all_years) & set(resp_raw["진료년도"].unique()))
+years      = sorted(set(air_years) & set(resp_raw["진료년도"].unique()))
 
-# ➡️ 수치형 변환 (모든 연도 한번에)
 @st.cache_data(show_spinner=False)
-def to_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    df_num = df.copy()
-    year_cols = [c for c in df.columns if c[:4].isdigit()]
-    df_num[year_cols] = df_num[year_cols].replace({",": ""}, regex=True).astype(float)
-    return df_num
+def make_numeric(df):
+    out = df.copy()
+    cols = [c for c in out.columns if c[:4].isdigit()]
+    out[cols] = out[cols].replace({",": ""}, regex=True).astype(float)
+    return out
+air_num = make_numeric(air_df)
 
-air_num = to_numeric(air_df)
+regions = [r for r in air_df[region_col] if r not in ("전국", "바다")]
+sample_year_cols = [c for c in air_num.columns if c.startswith(years[0])]
+pollutants = [poll_row[c] for c in sample_year_cols]
 
-# -------------------------------------------------------------
-# 3️⃣ 탭 구성 -----------------------------------------------------------
-# -------------------------------------------------------------
+# ──────────────────────── 3. 사용자 선택 ────────────────────────
+st.sidebar.subheader("분석 파라미터")
+sel_year   = st.sidebar.selectbox("연도", years, index=len(years)-1)
+sel_region = st.sidebar.selectbox("지역", regions, index=regions.index("경기도") if "경기도" in regions else 0)
+sel_poll   = st.sidebar.selectbox("오염물질", ["전체(모든 물질 합계)"] + pollutants)
 
-tab1, tab2, tab3 = st.tabs([
-    "연도·오염물질 산점도", "연도별 상관 Heatmap", "지역별 상관계수(연도 변화)",
-])
+# ──────────────────────── 4. (연도·오염물질) 산점도 ────────────────────────
+year_cols = [c for c in air_num.columns if c.startswith(sel_year)]
+poll_map  = {c: poll_row[c] for c in year_cols}
+sub_air   = air_num[[region_col] + year_cols].copy()
 
-# =============================================================
-# 📌 TAB 1 ─ 연도·오염물질 산점도
-# =============================================================
-with tab1:
-    st.header("① 선택 연도·오염물질 산점도 및 상관계수")
-    col1, col2 = st.columns(2)
-    sel_year = col1.selectbox("연도 선택", common_years, index=len(common_years) - 1)
+if sel_poll == "전체(모든 물질 합계)":
+    sub_air["배출량"] = sub_air[year_cols].sum(axis=1)
+    x_label = "총 배출량 (kg)"
+else:
+    use_col = next(c for c, n in poll_map.items() if n == sel_poll)
+    sub_air["배출량"] = sub_air[use_col]
+    x_label = f"{sel_poll} 배출량 (kg)"
 
-    # 연도별 오염물질 컬럼 & 이름 매핑
-    year_cols = [c for c in air_num.columns if c.startswith(sel_year)]
-    poll_map = {c: pollutant_row[c] for c in year_cols}
-    poll_options = ["전체(모든 물질 합계)"] + list(poll_map.values())
-    sel_poll = col2.selectbox("오염물질 선택", poll_options)
+resp_year = resp_raw[resp_raw["진료년도"] == sel_year].copy()
+resp_year["비율"] = resp_year["주민등록인구별 진료실인원 비율"].str.replace("%", "").astype(float)
 
-    # 🔹 배출량 계산
-    sub_df = air_num[~air_num[region_col].isin(["전국", "바다"])]
-    if sel_poll == "전체(모든 물질 합계)":
-        sub_df["배출량"] = sub_df[year_cols].sum(axis=1)
-        x_label = "총 배출량 (kg)"
-    else:
-        sel_col = next(col for col, name in poll_map.items() if name == sel_poll)
-        sub_df["배출량"] = sub_df[sel_col]
-        x_label = f"{sel_poll} 배출량 (kg)"
+merged = pd.merge(sub_air[[region_col,"배출량"]],
+                  resp_year[["시도","비율"]],
+                  left_on=region_col, right_on="시도")
 
-    # 🔹 질환 데이터
-    resp_year = resp_raw[resp_raw["진료년도"] == sel_year].copy()
-    resp_year["비율"] = resp_year["주민등록인구별 진료실인원 비율"].str.replace("%", "").astype(float)
+r_year = merged["배출량"].corr(merged["비율"])
+st.subheader(f"① {sel_year}년 {sel_poll} 배출량 ↔ 질환 비율 (r = {r_year:.3f})")
 
-    merged = pd.merge(
-        sub_df[[region_col, "배출량"]],
-        resp_year[["시도", "비율"]],
-        left_on=region_col,
-        right_on="시도",
+fig = px.scatter(
+    merged, x="배출량", y="비율", hover_name="시도",
+    labels={"배출량":x_label, "비율":"호흡기 질환 진료자수 비율 (%)"},
+    template="plotly_white",
+)
+m,b = np.polyfit(merged["배출량"], merged["비율"], 1)
+fig.add_scatter(x=np.linspace(merged["배출량"].min(), merged["배출량"].max(),100),
+                y=m*np.linspace(merged["배출량"].min(), merged["배출량"].max(),100)+b,
+                mode="lines", name="회귀선", line=dict(dash="dash"))
+# 선택 지역 강조
+if sel_region in merged["시도"].values:
+    row = merged[merged["시도"]==sel_region].iloc[0]
+    fig.add_scatter(x=[row["배출량"]], y=[row["비율"]], mode="markers+text",
+                    marker=dict(size=12,color="#ff7f0e"),
+                    text=[sel_region], textposition="bottom center",
+                    name=sel_region)
+st.plotly_chart(fig, use_container_width=True)
+
+# ───── Heatmap : 해당 연도 모든 오염물질 vs 질환 상관 ─────
+heat = []
+for col,name in poll_map.items():
+    tmp = pd.merge(air_num[[region_col,col]].rename(columns={col:"val"}),
+                   resp_year[["시도","비율"]],
+                   left_on=region_col, right_on="시도")
+    heat.append({"Pollutant":name, "r":round(tmp["val"].corr(tmp["비율"]),3)})
+heat.append({"Pollutant":"전체", "r":round(r_year,3)})
+heat_df = pd.DataFrame(heat).set_index("Pollutant")
+
+st.plotly_chart(
+    px.imshow(heat_df, text_auto=True, zmin=-1, zmax=1,
+              color_continuous_scale="RdBu",
+              title=f"{sel_year}년 오염물질별 상관계수 Heatmap"),
+    use_container_width=True,
+)
+
+# ──────────────────────── 5. 선택 지역·오염물질 연도별 시계열 ────────────────────────
+st.subheader(f"② {sel_region}의 연도별 {sel_poll} 배출량 ↔ 질환 비율")
+
+def yearly_emission(region, pollutant):
+    data = {}
+    for yr in years:
+        yr_cols = [c for c in air_num.columns if c.startswith(yr)]
+        if pollutant == "전체(모든 물질 합계)":
+            data[yr] = air_num.loc[air_num[region_col]==region, yr_cols].sum(axis=1).values[0]
+        else:
+            col = next(c for c in yr_cols if poll_row[c] == pollutant)
+            data[yr] = air_num.loc[air_num[region_col]==region, col].values[0]
+    return pd.Series(data)
+
+emis = yearly_emission(sel_region, sel_poll)
+ratio = resp_raw[resp_raw["시도"]==sel_region].set_index("진료년도")["주민등록인구별 진료실인원 비율"].str.replace("%","").astype(float)
+ts = pd.DataFrame({"Emission":emis, "Ratio":ratio}).dropna()
+
+if ts.shape[0] >= 3:
+    r_ts = ts["Emission"].corr(ts["Ratio"])
+    st.write(f"연도별 Pearson r = **{r_ts:.3f}**")
+    st.plotly_chart(
+        px.scatter(ts, x="Emission", y="Ratio", text=ts.index,
+                   labels={"Emission":x_label, "Ratio":"질환 비율(%)"},
+                   template="plotly_white",
+                   title=f"{sel_region} {sel_poll} 배출 ↔ 질환 비율 (연도별)"),
+        use_container_width=True,
     )
+else:
+    st.warning("연도별 상관계수를 계산하기에 데이터가 부족합니다.")
 
-    if merged.empty:
-        st.error("선택한 연도·오염물질에 해당하는 데이터가 없습니다.")
-    else:
-        r_val = merged["배출량"].corr(merged["비율"])
-        st.metric("Pearson r", f"{r_val:.3f}")
-
-        fig = px.scatter(
-            merged,
-            x="배출량",
-            y="비율",
-            hover_name="시도",
-            labels={"배출량": x_label, "비율": "호흡기 질환 진료자수 비율 (%)"},
-            title=f"{sel_year}년 {sel_poll} 배출량 vs 호흡기 질환 비율",
-            template="plotly_white",
-        )
-        # 회귀선
-        m, b = np.polyfit(merged["배출량"], merged["비율"], 1)
-        x_range = np.linspace(merged["배출량"].min(), merged["배출량"].max(), 100)
-        fig.add_scatter(x=x_range, y=m * x_range + b, mode="lines", name="회귀선", line=dict(dash="dash"))
-
-        st.plotly_chart(fig, use_container_width=True)
-
-        with st.expander("📄 데이터 보기"):
-            st.dataframe(
-                merged.rename(columns={region_col: "지역"}).sort_values("비율", ascending=False).reset_index(drop=True),
-                use_container_width=True,
-            )
-
-# =============================================================
-# 📌 TAB 2 ─ 연도별 상관 Heatmap
-# =============================================================
-with tab2:
-    st.header("② 연도별 오염물질-질환 상관계수 Heatmap")
-
-    @st.cache_data(show_spinner=False)
-    def compute_year_corr(air_numeric, resp_df, years, region_col, pollutant_row):
-        records = []
-        for yr in years:
-            year_cols = [c for c in air_numeric.columns if c.startswith(yr)]
-            poll_map = {c: pollutant_row[c] for c in year_cols}
-            sub_air = air_numeric[~air_numeric[region_col].isin(["전국", "바다"])]
-            resp_year = resp_df[resp_df["진료년도"] == yr].copy()
-            if resp_year.empty:
-                continue
-            resp_year["비율"] = resp_year["주민등록인구별 진료실인원 비율"].str.replace("%", "").astype(float)
-
-            # total
-            merged_tot = pd.merge(
-                sub_air[[region_col] + year_cols].assign(총배출=sub_air[year_cols].sum(axis=1))[[region_col, "총배출"]],
-                resp_year[["시도", "비율"]],
-                left_on=region_col,
-                right_on="시도",
-            )
-            r_total = merged_tot["총배출"].corr(merged_tot["비율"])
-            records.append({"Year": yr, "Pollutant": "전체", "r": round(r_total, 3)})
-
-            for col, name in poll_map.items():
-                merged = pd.merge(
-                    sub_air[[region_col, col]],
-                    resp_year[["시도", "비율"]],
-                    left_on=region_col,
-                    right_on="시도",
-                )
-                r_val = merged[col].corr(merged["비율"])
-                records.append({"Year": yr, "Pollutant": name, "r": round(r_val, 3)})
-        df = pd.DataFrame(records)
-        return df.pivot(index="Pollutant", columns="Year", values="r")
-
-    corr_pivot = compute_year_corr(air_num, resp_raw, common_years, region_col, pollutant_row)
-    st.dataframe(corr_pivot, height=400, use_container_width=True)
-
-    fig_hm = px.imshow(
-        corr_pivot,
-        text_auto=True,
-        aspect="auto",
-        color_continuous_scale="RdBu",
-        zmin=-1,
-        zmax=1,
-        origin="lower",
-        title="연도별 상관계수 Heatmap (빨강:+ / 파랑:−)",
-    )
-    st.plotly_chart(fig_hm, use_container_width=True)
-
-# =============================================================
-# 📌 TAB 3 ─ 지역별 상관계수 (연도 변화)
-# =============================================================
-with tab3:
-    st.header("③ 지역별 총 배출량·질환 상관계수 (2017–2021)")
-
-    @st.cache_data(show_spinner=False)
-    def compute_region_corr(air_numeric, resp_df, years, region_col):
-        # 총 배출량 시계열
-        total_by_year = {
-            yr: air_numeric[[c for c in air_numeric.columns if c.startswith(yr)]].sum(axis=1)
-            for yr in years
-        }
-        total_df = pd.DataFrame(total_by_year)
-        total_df[region_col] = air_numeric[region_col]
-
-        # 질환 시계열
-        resp_df = resp_df[resp_df["진료년도"].isin(years)].copy()
-        resp_df["ratio"] = resp_df["주민등록인구별 진료실인원 비율"].str.replace("%", "").astype(float)
-        resp_pivot = resp_df.pivot(index="시도", columns="진료년도", values="ratio")
-
-        records = []
-        for region in total_df[region_col]:
-            if region in ["전국", "바다"] or region not in resp_pivot.index:
-                continue
-            emission = total_df[total_df[region_col] == region][years].iloc[0]
-            ratio = resp_pivot.loc[region, years]
-            combined = pd.concat([emission, ratio], axis=1, keys=["emission", "ratio"]).dropna()
-            if len(combined) >= 3:
-                r_val = combined["emission"].corr(combined["ratio"])
-                records.append({"Region": region, "r": round(r_val, 3)})
-        return pd.DataFrame(records).sort_values("Region")
-
-    region_corr_df = compute_region_corr(air_num, resp_raw, common_years, region_col)
-    st.dataframe(region_corr_df, height=500, use_container_width=True)
-
-    st.caption("연도별 총 배출량(kg)과 질환 진료자수 비율(%)의 Pearson r — 양(+)·음(−) 상관 여부를 참고하세요.")
+# ─────────────────────────────
+st.caption("※ 글꼴이 깨질 경우 서버(또는 로컬)에 NanumGothic 등 한글 폰트를 설치한 뒤 "
+           "fig.update_layout(font_family='NanumGothic') 한 줄을 추가해 주세요.")
