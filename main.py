@@ -216,4 +216,3 @@ with tab3:
     st.dataframe(region_corr_df, height=500, use_container_width=True)
 
     st.caption("연도별 총 배출량(kg)과 질환 진료자수 비율(%)의 Pearson r — 양(+)·음(−) 상관 여부를 참고하세요.")
-
